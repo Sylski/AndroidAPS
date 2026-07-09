@@ -2,6 +2,8 @@ package app.aaps.pump.carelevo.di
 
 import android.content.Context
 import app.aaps.core.interfaces.logging.AAPSLogger
+import app.aaps.pump.carelevo.ble.CarelevoBleTransport
+import app.aaps.pump.carelevo.ble.CarelevoBleTransportImpl
 import app.aaps.pump.carelevo.ble.core.CarelevoBleController
 import app.aaps.pump.carelevo.ble.core.CarelevoBleControllerImpl
 import app.aaps.pump.carelevo.ble.core.CarelevoBleManager
@@ -47,6 +49,16 @@ class CarelevoBleModule {
         @Named("characterTx") tx: UUID,
         @Named("characterRx") rx: UUID
     ) = BleParams(cccd, serviceUuid, tx, rx)
+
+    /**
+     * Shared-fleet [BleTransport][app.aaps.core.interfaces.pump.ble.BleTransport] for CareLevo.
+     * The new coroutine stack ([app.aaps.pump.carelevo.ble.BleClient] via
+     * [app.aaps.pump.carelevo.ble.gatt.BleTransportGattConnection]) runs on this; a future
+     * emulator impl can be swapped in here. See `_docs/carelevo-new-ble-stack.md`.
+     */
+    @Provides
+    @Singleton
+    internal fun provideCarelevoBleTransport(impl: CarelevoBleTransportImpl): CarelevoBleTransport = impl
 
     @Provides
     @Singleton

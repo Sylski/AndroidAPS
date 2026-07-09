@@ -10,12 +10,15 @@ A new coroutine-first BLE stack built alongside the legacy `PublishSubject + blo
 ble/
 ├── BleClient.kt              — interface + BleCommand + BleResponse + UnsolicitedMessage + BleDisconnectedException
 ├── BleClientImpl.kt          — Mutex-serialized; registers @Volatile waiter BEFORE writing; opcode + optional correlationByte match
+├── CarelevoBleTransport.kt   — [Phase 1] pump-local BleTransport (adds scanAddress, onGattError133)
+├── CarelevoBleTransportImpl.kt — [Phase 1] production impl over Android GATT; near-clone of EquilBleTransportImpl
 ├── commands/
 │   ├── MacAddressCommand.kt  — 0x3B→0x9B, read-only, uses clean uppercase hex (not legacy 0xAA0xBB format)
 │   └── ImmediateBolusCommand.kt — 0x24→0x84, actionId correlation, BigDecimal HALF_UP rounding
 └── gatt/
     ├── GattConnection.kt     — abstraction: SharedFlow<GattEvent> + write/discover/enableNotifications/close
-    └── AndroidGattConnection.kt — Android BluetoothGatt wrapper, **UNTESTED ON HARDWARE**
+    ├── AndroidGattConnection.kt — bespoke Android BluetoothGatt wrapper; smoke-test only, superseded by the adapter below
+    └── BleTransportGattConnection.kt — [Phase 1] adapter: GattConnection over the shared BleTransport (keeps BleClient unchanged)
 
 compose/smoketest/
 └── CarelevoBleSmokeTest.kt   — runMacAddressSmokeTest() + CarelevoBleSmokeTestDialog Composable
@@ -51,16 +54,80 @@ Two legitimate protocol patterns not expressible with current `request(cmd): R` 
 
 Design extension required before porting these commands. Simple single-response commands (SetTime, TempBasal, BolusCancel, etc.) work with current API unchanged.
 
-## Migration roadmap (next steps, in rough order)
+## Transport abstraction: adopt the shared `BleTransport` (decided 2026-07-09)
 
-1. **Hardware smoke test** — unpair a patch, build+flash, run the dev dialog with an unbonded pump. If MAC comes back correctly, `AndroidGattConnection` is validated on real hardware. This is the critical-path gate before any wider rollout.
-2. **Extend BleClient API** for multi-response + streaming patterns (before writing 30 commands that would then need refactoring).
-3. **Bulk-write remaining commands** — ~30 total, each ~70 lines, fully unit-testable against `FakeGattConnection`.
-4. **Migrate first repository** behind a feature flag. Suggested start: a non-dosing read-only repo (patch info), so any bug has low blast radius. Keep the legacy path available for instant rollback.
-5. **End-to-end equivalence tests** — small set (~6) at `CarelevoPumpPlugin` level with faked `GattConnection` below, real everything above. Run against both legacy and new stacks to prove equivalent `PumpEnactResult` outputs.
-6. **State consolidation** — collapse `BehaviorSubject<Optional<X>>` + `StateFlow<X?>` + LiveData triple state in `CarelevoPatch` to StateFlow-only. Bridge extension `StateFlow.asBehaviorSubject()` keeps legacy consumers alive during migration.
-7. **Coordinator simplification** — once repositories are suspend, coordinators become thin suspend orchestrators. Single `runBlocking(IO)` at Pump-interface boundary in `CarelevoPumpPlugin`.
-8. **Drop RxJava dependency** — final cleanup once all consumers migrated.
+The fleet already has a shared, coroutine-native BLE transport abstraction:
+`app.aaps.core.interfaces.pump.ble.BleTransport` (`BleAdapter` + `BleScanner` + `BleGatt` +
+`BleTransportListener` + `PairingState`). Dana (`BleTransportImpl` + `danars-emulator`), Equil
+(`EquilBleTransportImpl` + `equil-emulator`) and Medtrum (`MedtrumBleTransportImpl`) all run on it,
+with hardware-free emulator implementations for integration testing.
+
+carelevo's bespoke `GattConnection`/`AndroidGattConnection` is a parallel reinvention of `BleGatt`.
+**Decision: carelevo adopts `BleTransport` as its transport, keeping the (cleaner-than-fleet)
+`BleClient` correlation layer on top.** Equil is the closest template — a patch-style pump with a
+single service / single write char / single notify char, the exact shape carelevo needs.
+
+Note: the Rx→coroutine correlation fix lives entirely in `BleClient` and is transport-agnostic.
+`BleTransport` adoption is about **code unification** (and a later, near-free emulator), not the race fix.
+
+### How it layers — Option A (chosen): `BleClient` untouched, one adapter
+
+`BleClientImpl` depends only on the `GattConnection` interface, so we keep that seam and add one
+adapter instead of rewriting the client:
+
+- `CarelevoBleTransport : BleTransport` — pump-local interface (adds `scanAddress`, `onGattError133`), mirrors `EquilBleTransport`.
+- `CarelevoBleTransportImpl` — near-clone of `EquilBleTransportImpl`; resolves tx(notify `e1b40003`)+rx(write `e1b40002`) from service `e1b40001` in `onServicesDiscovered`; fans the single `BluetoothGattCallback` out to one `BleTransportListener`.
+- `BleTransportGattConnection : GattConnection, BleTransportListener` — the bridge: registers as the transport's single listener, turns each callback into the `GattEvent`/`CompletableDeferred` that `GattConnection` promises. `AndroidGattConnection` is its internal template.
+- DI: `CarelevoBleModule` provides `CarelevoBleTransport`.
+
+`BleClientImpl` / all 11 contract tests: **zero changes.**
+
+Not chosen — Option B (make `BleClientImpl` implement `BleTransportListener` directly, delete
+`GattConnection`): rewrites the client + its tests and downgrades carelevo's clean
+transport/correlation/codec split to Equil's monolithic consumer shape. No functional gain.
+
+### Accepted caveat
+
+`BleGatt.writeCharacteristic(data)` is fire-and-forget `Unit`; `BleTransportListener.onCharacteristicWritten()`
+carries no status. So a write the BLE stack silently drops is no longer fast-failed with
+`GattWriteException` — it degrades to the caller's `withTimeout(...)`, which every `BleClient.request`
+already applies. Equil ships with this exact behaviour. The *not-connected* case is still fast-failed
+(the transport calls `onConnectionStateChanged(false)` synchronously from the write).
+
+## Migration roadmap (revised 2026-07-09)
+
+**Phase 1 — transport unification (DONE 2026-07-09, ~450 LOC, purely additive, build + 172 tests green).**
+Added `CarelevoBleTransport` + `CarelevoBleTransportImpl` + `BleTransportGattConnection` + DI +
+`BleTransportGattConnectionTest` (14 tests incl. end-to-end `BleClient`-over-adapter correlation).
+`BleClient` now runs on the shared `BleTransport`. No production behaviour change yet — still driven
+only by the dev smoke test. Hardware validation: point the smoke test at the transport path (a few
+lines) when a pump is on hand; `CarelevoBleTransportImpl` is a near-clone of the hardware-proven Equil impl.
+
+Adversarial review applied: the adapter now self-guards post-`close()` calls with a `closed` flag
+(fail fast instead of hang, mirroring `AndroidGattConnection`'s `gatt ?: throw`), `require`s the
+`uuid` args match its single write/notify chars (mismatch fails loudly), and the transport logs a
+warning if its single listener slot is overwritten without a prior `close()` (Phase-2 reconnect guard).
+Known deferred (matches `AndroidGattConnection`, not a regression): the `writeAck`/`discoveryAck`/
+`descriptorAck` fields are keyed by "current op" not a per-op token — a stale late ack could in
+theory complete a newer op's deferred. Shared follow-up for both classes someday.
+
+**Phase 2 — legacy-Rx retirement (larger, higher-risk, follow-up).** Wire `BleClient` into production
+command paths and delete the legacy stack (`CarelevoBleMangerImpl` ~1026 LOC + `CarelevoBleControllerImpl`
+~258 + `CarelevoBleSource`), rewiring `CarelevoConnectionCoordinator`'s connect/reconnect/timeout.
+Sub-steps:
+
+1. **Extend BleClient API** for multi-response (`0x33→0x93+0x94`) + streaming (`0x12`) before bulk-writing commands.
+2. **Bulk-write remaining commands** — ~30 total, each ~70 lines, unit-testable against `FakeGattConnection`.
+3. **Migrate first repository** behind a feature flag. Start read-only (patch info) for low blast radius; keep the legacy path for instant rollback.
+4. **End-to-end equivalence tests** — small set (~6) at `CarelevoPumpPlugin` level with a faked `GattConnection`/`BleTransport` below, run against both stacks to prove equivalent `PumpEnactResult`.
+5. **State consolidation** — collapse `BehaviorSubject<Optional<X>>` + `StateFlow<X?>` + LiveData triple in `CarelevoPatch` to StateFlow-only.
+6. **Coordinator simplification** — thin suspend orchestrators; single `runBlocking(IO)` at the Pump-interface boundary.
+7. **Drop RxJava dependency** — final cleanup once all consumers migrated.
+
+**Emulator (deferred, near-free once on `BleTransport`).** A `:pump:carelevo-emulator` module mirroring
+`equil-emulator`: a `CarelevoEmulatorBleTransport` swapped in via DI, driving `onCharacteristicChanged`
+to simulate the pump. Because `BleClient` sits on `BleGatt`/`BleTransportListener`, the emulator plugs
+in at the same seam and the correlation layer works unchanged — removing the hardware gate for CI.
 
 Each phase ships a working driver; no long-lived broken intermediate state.
 
