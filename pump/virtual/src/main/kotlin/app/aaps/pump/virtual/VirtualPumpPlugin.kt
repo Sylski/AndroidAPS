@@ -16,8 +16,6 @@ import app.aaps.core.interfaces.insulin.ConcentrationHelper
 import app.aaps.core.interfaces.insulin.Insulin
 import app.aaps.core.interfaces.logging.AAPSLogger
 import app.aaps.core.interfaces.logging.LTag
-import app.aaps.core.interfaces.notifications.NotificationId
-import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.core.interfaces.plugin.PermissionGroup
 import app.aaps.core.interfaces.plugin.PluginDescription
 import app.aaps.core.interfaces.pump.BolusProgressData
@@ -71,7 +69,6 @@ open class VirtualPumpPlugin @Inject constructor(
     private val dateUtil: DateUtil,
     private val persistenceLayer: PersistenceLayer,
     private val pumpEnactResultProvider: Provider<PumpEnactResult>,
-    private val notificationManager: NotificationManager,
     private val ch: ConcentrationHelper,
     private val insulin: Insulin,
     private val bolusProgressData: BolusProgressData,
@@ -191,7 +188,7 @@ open class VirtualPumpPlugin @Inject constructor(
 
     override suspend fun setNewBasalProfile(profile: PumpProfile): PumpEnactResult {
         _lastDataTime.value = System.currentTimeMillis()
-        notificationManager.post(NotificationId.PROFILE_SET_OK, app.aaps.core.ui.R.string.profile_set_ok, validMinutes = 60)
+        // PROFILE_SET_OK is now posted centrally by CommandSetProfile on success && enacted (unified across pumps).
         // Do nothing here. we are using database profile
         return pumpEnactResultProvider.get().success(true).enacted(true)
     }
