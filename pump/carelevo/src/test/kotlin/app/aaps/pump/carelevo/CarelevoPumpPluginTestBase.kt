@@ -19,6 +19,7 @@ import app.aaps.core.interfaces.ui.UiInteraction
 import app.aaps.core.interfaces.utils.DateUtil
 import app.aaps.core.interfaces.utils.fabric.FabricPrivacy
 import app.aaps.core.keys.interfaces.Preferences
+import app.aaps.pump.carelevo.ble.CarelevoNewStackGateway
 import app.aaps.pump.carelevo.ble.core.CarelevoBleController
 import app.aaps.pump.carelevo.ble.data.BleState
 import app.aaps.pump.carelevo.ble.data.BondingState
@@ -97,6 +98,7 @@ abstract class CarelevoPumpPluginTestBase {
     @Mock lateinit var carelevoProtocolParserRegister: CarelevoProtocolParserRegister
     @Mock lateinit var carelevoPatch: CarelevoPatch
     @Mock lateinit var bleController: CarelevoBleController
+    @Mock lateinit var newStackGateway: CarelevoNewStackGateway
     @Mock lateinit var activationExecutor: CarelevoActivationExecutor
 
     @Mock lateinit var setBasalProgramUseCase: CarelevoSetBasalProgramUseCase
@@ -184,6 +186,8 @@ abstract class CarelevoPumpPluginTestBase {
             aapsSchedulers = aapsSchedulers,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,
+            preferences = preferences,
+            gateway = newStackGateway,
             startImmeBolusInfusionUseCase = startImmeBolusInfusionUseCase,
             finishImmeBolusInfusionUseCase = finishImmeBolusInfusionUseCase,
             cancelImmeBolusInfusionUseCase = cancelImmeBolusInfusionUseCase,
@@ -197,6 +201,8 @@ abstract class CarelevoPumpPluginTestBase {
             pumpSync = pumpSync,
             pumpEnactResultProvider = pumpEnactResultProvider,
             carelevoPatch = carelevoPatch,
+            preferences = preferences,
+            gateway = newStackGateway,
             startTempBasalInfusionUseCase = startTempBasalInfusionUseCase,
             cancelTempBasalInfusionUseCase = cancelTempBasalInfusionUseCase
         )

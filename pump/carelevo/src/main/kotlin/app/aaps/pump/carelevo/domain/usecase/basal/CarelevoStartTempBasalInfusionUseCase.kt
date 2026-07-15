@@ -111,4 +111,27 @@ class CarelevoStartTempBasalInfusionUseCase @Inject constructor(
             )
         }.timeout(3000L, TimeUnit.MILLISECONDS).observeOn(Schedulers.io())
     }
+
+    /**
+     * Persist a started temp basal (`mode=2` + temp-basal infusion-info) — extracted from [execute]'s
+     * post-write branch so the Phase-2 new-BLE-stack path reuses the exact same writes. Returns false with no
+     * patch record or if any write fails.
+     */
+    fun persistTempBasalStarted(request: StartTempBasalInfusionRequestModel): Boolean = runCatching {
+        val patchInfo = patchInfoRepository.getPatchInfoBySync()
+            ?: throw NullPointerException("patch info must be not null")
+        require(
+            infusionInfoRepository.updateTempBasalInfusionInfo(
+                CarelevoTempBasalInfusionInfoDomainModel(
+                    infusionId = generateUUID(),
+                    address = patchInfo.address,
+                    mode = 2,
+                    percent = request.percent,
+                    speed = request.speed,
+                    infusionDurationMin = request.minutes
+                )
+            )
+        ) { "update infusion info is failed" }
+        require(patchInfoRepository.updatePatchInfo(patchInfo.copy(updatedAt = DateTime.now(), mode = 2))) { "update patch info is failed" }
+    }.isSuccess
 }

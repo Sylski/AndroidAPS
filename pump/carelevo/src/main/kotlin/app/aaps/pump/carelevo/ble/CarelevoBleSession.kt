@@ -22,6 +22,8 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
 import javax.inject.Inject
@@ -50,6 +52,12 @@ class CarelevoBleSession @Inject constructor(
     @Named("characterTx") private val notifyUuid: UUID,
     private val aapsLogger: AAPSLogger
 ) {
+
+    // The new transport is a @Singleton with a SINGLE GATT + single listener slot, so two sessions can
+    // never physically overlap. This mutex enforces that at the API level: every session serializes, so an
+    // out-of-band caller (e.g. a bolus cancel fired off the queue worker by cancelAllBoluses) waits for the
+    // in-flight session to close and release before it opens — never a two-GATT status-133 collision.
+    private val sessionMutex = Mutex()
 
     /**
      * Connect to [address], read Patch Info (0x33 → 0x93 RPT1 + 0x94 RPT2), and close.
@@ -98,22 +106,23 @@ class CarelevoBleSession @Inject constructor(
      * Open a fresh connection, run [block] against the [BleClient], and close. Each call gets its own
      * adapter+client+scope — see the class KDoc for why (one-shot [BleTransportGattConnection.close]).
      */
-    private suspend fun <R> withSession(address: String, label: String, timeoutMs: Long = READ_TIMEOUT_MS, block: suspend (BleClient) -> R): R {
-        // BluetoothAdapter.getRemoteDevice requires an UPPERCASE MAC (lowercase throws
-        // IllegalArgumentException); the stored address is lowercase, so normalize here.
-        val mac = address.uppercase()
-        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        val gatt = BleTransportGattConnection(transport, writeUuid, notifyUuid, scope)
-        val client: BleClient = BleClientImpl(gatt, writeUuid, notifyUuid, scope)
-        try {
-            open(gatt, mac)
-            aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
-            return withTimeout(timeoutMs) { block(client) }
-        } finally {
-            gatt.close()
-            scope.cancel()
+    private suspend fun <R> withSession(address: String, label: String, timeoutMs: Long = READ_TIMEOUT_MS, block: suspend (BleClient) -> R): R =
+        sessionMutex.withLock {
+            // BluetoothAdapter.getRemoteDevice requires an UPPERCASE MAC (lowercase throws
+            // IllegalArgumentException); the stored address is lowercase, so normalize here.
+            val mac = address.uppercase()
+            val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            val gatt = BleTransportGattConnection(transport, writeUuid, notifyUuid, scope)
+            val client: BleClient = BleClientImpl(gatt, writeUuid, notifyUuid, scope)
+            try {
+                open(gatt, mac)
+                aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
+                withTimeout(timeoutMs) { block(client) }
+            } finally {
+                gatt.close()
+                scope.cancel()
+            }
         }
-    }
 
     private suspend fun open(gatt: BleTransportGattConnection, address: String) = coroutineScope {
         // Subscribe to the CONNECTED event BEFORE calling connect() so the state change cannot race

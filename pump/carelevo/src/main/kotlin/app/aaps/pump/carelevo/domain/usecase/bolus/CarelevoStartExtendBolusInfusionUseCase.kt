@@ -86,4 +86,27 @@ class CarelevoStartExtendBolusInfusionUseCase @Inject constructor(
             )
         }.observeOn(Schedulers.io())
     }
+
+    /**
+     * Persist a started extended bolus (`mode=5` + extend-bolus infusion-info) — extracted from [execute]'s
+     * post-write branch so the Phase-2 new-BLE-stack path reuses the exact same writes. [volume] is the total
+     * insulin, [speed] the computed U/h. Returns false with no patch record or if any write fails.
+     */
+    fun persistExtendBolusStarted(volume: Double, speed: Double, minutes: Int): Boolean = runCatching {
+        val patchInfo = patchInfoRepository.getPatchInfoBySync()
+            ?: throw NullPointerException("patch info must be not null")
+        require(
+            infusionInfoRepository.updateExtendBolusInfusionInfo(
+                CarelevoExtendBolusInfusionInfoDomainModel(
+                    infusionId = generateUUID(),
+                    address = patchInfo.address,
+                    mode = 5,
+                    volume = volume,
+                    speed = speed,
+                    infusionDurationMin = minutes
+                )
+            )
+        ) { "update infusion info is failed" }
+        require(patchInfoRepository.updatePatchInfo(patchInfo.copy(updatedAt = DateTime.now(), mode = 5))) { "update patch info is failed" }
+    }.isSuccess
 }

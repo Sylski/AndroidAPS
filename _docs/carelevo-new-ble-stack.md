@@ -245,6 +245,11 @@ whole driver):**
   `CarelevoPatch.applyInfusionInfoReport` (shared `dispatchInfusionInfo`; identical pumpState/mode enum-roundtrip) →
   like-for-like, non-degrading. Proves the single-response `request()` path on hardware. ~26 commands remain.
 - **2.C — Rewire coordinator+executor to the session; delete `awaitOnIo`; flip default** (legacy behind flag-off).
+  Executor `customCommand` ops all done (settings + activation: needle/safety/alarm×2/set-basal). The
+  **delivery-path** portion (bolus/temp-basal/extended + cancels, through the coordinators) has its own detailed
+  plan in [`CARELEVO_DELIVERY_MIGRATION.md`](CARELEVO_DELIVERY_MIGRATION.md) — per-op fresh sessions (no
+  persistent-connection rewire needed), sequenced D1 temp-basal → D2 extended → D3 immediate-bolus; bolus cancel
+  = Option A (per-op cancel session).
 - **2.D — Delete legacy + flag + RxJava; re-enable the disabled patch-info test on `BleClient`.**
 - **Emulator** (parallel) makes 2.B/2.C CI-testable without hardware.
 
