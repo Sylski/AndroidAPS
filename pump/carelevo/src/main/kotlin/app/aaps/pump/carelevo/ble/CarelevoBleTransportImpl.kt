@@ -28,6 +28,7 @@ import app.aaps.core.interfaces.pump.ble.BleTransportListener
 import app.aaps.core.interfaces.pump.ble.PairingState
 import app.aaps.core.interfaces.pump.ble.ScannedDevice
 import app.aaps.pump.carelevo.config.BleEnvConfig
+import app.aaps.pump.carelevo.ext.convertBytesToHex
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -107,7 +108,12 @@ class CarelevoBleTransportImpl @Inject constructor(
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            listener?.onCharacteristicChanged(characteristic.value)
+            val data = characteristic.value
+            // Log every inbound frame (opcode = first byte) so patch-pushed notifications — alarms and the
+            // auto-resume report — are visible even though the unsolicited path is not yet consumed. The
+            // pre-migration driver logged incoming frames here; the transport migration dropped it.
+            aapsLogger.debug(LTag.PUMPBTCOMM, "onCharacteristicChanged incoming: ${data.convertBytesToHex()}")
+            listener?.onCharacteristicChanged(data)
         }
 
         @Synchronized
