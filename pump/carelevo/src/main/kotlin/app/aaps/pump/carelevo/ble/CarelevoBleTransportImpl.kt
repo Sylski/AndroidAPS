@@ -159,7 +159,7 @@ class CarelevoBleTransportImpl @Inject constructor(
         override fun isDeviceBonded(address: String): Boolean {
             if (!hasPermission(Manifest.permission.BLUETOOTH_CONNECT)) return false
             val device = bluetoothAdapter?.getRemoteDevice(address) ?: return false
-            return device.bondState != BluetoothDevice.BOND_NONE
+            return device.bondState == BluetoothDevice.BOND_BONDED
         }
 
         override fun createBond(address: String): Boolean {
