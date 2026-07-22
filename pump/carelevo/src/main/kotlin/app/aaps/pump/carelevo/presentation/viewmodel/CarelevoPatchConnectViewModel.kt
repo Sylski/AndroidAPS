@@ -33,7 +33,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -100,8 +99,8 @@ class CarelevoPatchConnectViewModel @Inject constructor(
 
     /**
      * Discovery scan over the transport. `scanAddress = null` puts `CarelevoBleTransportImpl`'s scanner
-     * in service-UUID discovery mode; the first advertising patch wins. Stops early on a hit instead of
-     * always burning the full window.
+     * in service-UUID discovery mode; results are collected for a short window and the strongest RSSI
+     * patch is selected.
      */
     fun startScan() {
         if (!carelevoPatch.isBluetoothEnabled()) {
@@ -118,12 +117,19 @@ class CarelevoPatchConnectViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.IO) {
             val found = try {
                 transport.scanAddress = null
-                withTimeoutOrNull(SCAN_TIMEOUT_MS.milliseconds) {
+                val devicesByAddress = linkedMapOf<String, ScannedDevice>()
+                withTimeoutOrNull(DISCOVERY_COLLECTION_MS.milliseconds) {
                     transport.scanner.scannedDevices
                         // Subscribe BEFORE starting the scan so an immediate advertisement cannot be missed.
                         .onSubscription { transport.scanner.startScan() }
-                        .first()
+                        .collect { scanned ->
+                            val current = devicesByAddress[scanned.address]
+                            if (scanned.rssi >= MIN_SCAN_RSSI && (current == null || scanned.rssi > current.rssi)) {
+                                devicesByAddress[scanned.address] = scanned
+                            }
+                        }
                 }
+                devicesByAddress.values.maxByOrNull { it.rssi }
             } finally {
                 transport.scanner.stopScan()
                 _isScanWorking = false
@@ -286,7 +292,7 @@ class CarelevoPatchConnectViewModel @Inject constructor(
 
     private companion object {
 
-        // 10 s scan window; completes early on the first hit.
-        private const val SCAN_TIMEOUT_MS = 10_000L
+        private const val DISCOVERY_COLLECTION_MS = 5_000L
+        private const val MIN_SCAN_RSSI = -45
     }
 }

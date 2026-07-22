@@ -10,12 +10,14 @@ import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.ParcelUuid
 import android.os.SystemClock
 import androidx.core.app.ActivityCompat
@@ -209,7 +211,8 @@ class CarelevoBleTransportImpl @Inject constructor(
                             ScannedDevice(
                                 name = name,
                                 address = result.device.address,
-                                scanRecordBytes = result.scanRecord?.bytes
+                                scanRecordBytes = result.scanRecord?.bytes,
+                                rssi = result.rssi
                             )
                         )
                     }
@@ -289,11 +292,19 @@ class CarelevoBleTransportImpl @Inject constructor(
         @Suppress("deprecation")
         override fun enableNotifications() {
             val chara = notifyChara ?: return
-            val result = bluetoothGatt?.setCharacteristicNotification(chara, true)
-            if (result == true) {
-                val descriptor = chara.getDescriptor(CCCD_UUID)
-                descriptor?.setValue(BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-                bluetoothGatt?.writeDescriptor(descriptor)
+            val gatt = bluetoothGatt ?: return
+            val result = gatt.setCharacteristicNotification(chara, true)
+            if (result) {
+                val descriptor = chara.getDescriptor(CCCD_UUID) ?: return
+                val writeStarted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE) == BluetoothStatusCodes.SUCCESS
+                } else {
+                    descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                    gatt.writeDescriptor(descriptor)
+                }
+                if (!writeStarted) {
+                    aapsLogger.debug(LTag.PUMPBTCOMM, "enableNotifications: writeDescriptor could not start")
+                }
             }
         }
 
@@ -309,8 +320,15 @@ class CarelevoBleTransportImpl @Inject constructor(
             // setValue-then-write is NOT atomic on the shared characteristic object; it is safe only
             // because BleTransportGattConnection.gattMutex serializes all suspend GATT ops. Do not
             // decouple this transport from that serialization without adding one here.
-            chara.setValue(data)
-            gatt.writeCharacteristic(chara)
+            val writeStarted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(chara, data, chara.writeType) == BluetoothStatusCodes.SUCCESS
+            } else {
+                chara.value = data
+                gatt.writeCharacteristic(chara)
+            }
+            if (!writeStarted) {
+                aapsLogger.debug(LTag.PUMPBTCOMM, "writeCharacteristic: writeCharacteristic could not start")
+            }
         }
 
         override fun requestConnectionPriority(priority: Int) {
