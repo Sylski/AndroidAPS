@@ -76,7 +76,7 @@
     <string name="menu_ecarb">eKarbo</string>
     <string name="menu_settings">Innstillinger</string>
     <string name="menu_status">Status</string>
-    <string name="menu_bg_graph">Glukosegraf</string>
+    <string name="menu_bg_graph">BS-graf</string>
     <string name="menu_resync">Re-synk</string>
     <string name="menu_prime_fill">Prime/fylling</string>
     <string name="menu_none">Ingen</string>
@@ -220,7 +220,7 @@
     <string name="complication_blood_glucose_large">Blodsukker (stor)</string>
     <string name="complication_blood_glucose_ext1">BS Ekstern1</string>
     <string name="complication_blood_glucose_ext2">BS Ekstern2</string>
-    <string name="complication_bg_graph">BS graf</string>
+    <string name="complication_bg_graph">BS-graf</string>
     <string name="complication_br_cob_iob">Basaldose, COB &amp; IOB</string>
     <string name="complication_br_cob_iob_ext1">Basal, COB &amp; IOB Eks1</string>
     <string name="complication_br_cob_iob_ext2">Basal, COB &amp; IOB Eks2</string>
@@ -235,10 +235,10 @@
     <string name="complication_iob_detailed">IOB-detaljert</string>
     <string name="complication_uploader_phone_battery">Opplaster/mobilbatteri</string>
     <string name="label_running_mode_title">Kjøremodus</string>
-    <string name="label_bg_graph_tile">Glukosegraf</string>
+    <string name="label_bg_graph_tile">BS-graf</string>
     <string name="tile_tap_action">Handling ved trykk</string>
     <string name="tile_graph_time_range">Tidsrom</string>
-    <string name="tile_tap_bg_graph">Glukosegraf</string>
+    <string name="tile_tap_bg_graph">BS-graf</string>
     <string name="tile_tap_main_menu">Hovedmeny</string>
     <string name="tile_tap_loop_status">Loopstatus</string>
     <string name="action_running_mode_selected">Kjøremodus forespurt</string>
