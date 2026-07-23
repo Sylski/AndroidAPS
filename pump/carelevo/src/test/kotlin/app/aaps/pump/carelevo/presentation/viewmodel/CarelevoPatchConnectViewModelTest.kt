@@ -108,7 +108,7 @@ internal class CarelevoPatchConnectViewModelTest {
     private val events = CopyOnWriteArrayList<Event>()
     private lateinit var collectorScope: CoroutineScope
 
-    private val device = ScannedDevice(name = "CareLevo-1234", address = "94:b2:16:1d:2f:6d")
+    private val device = ScannedDevice(name = "CareLevo-1234", address = "94:b2:16:1d:2f:6d", rssi = -40)
 
     private val pairingResult = CarelevoBleSession.PairingResult(
         address = "94:b2:16:1d:2f:6d",
@@ -258,23 +258,41 @@ internal class CarelevoPatchConnectViewModelTest {
     // ---- startScan discovery ------------------------------------------------------------------
 
     @Test
-    fun `startScan auto-picks the first advertised patch stops early and offers the connect dialog`() {
+    fun `startScan picks an advertised patch above the RSSI floor and offers the connect dialog`() {
         whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
-        // replay=1 → the device is already buffered when `.first()` subscribes, so the 10 s window
-        // completes on the first hit instead of running out.
+        // Discovery collects for the whole DISCOVERY_COLLECTION_MS window (no early stop) then selects the
+        // strongest-RSSI device seen. replay=1 buffers the advertisement so the collector cannot miss it.
         whenever(scanner.scannedDevices).thenReturn(MutableSharedFlow<ScannedDevice>(replay = 1).apply { tryEmit(device) })
 
         sut.startScan()
-        awaitEvent()
+        // The window runs its full duration on the real IO pool, so wait past DISCOVERY_COLLECTION_MS.
+        awaitEvent(timeoutMs = 15_000L)
 
         assertThat(events).contains(CarelevoConnectPrepareEvent.ShowConnectDialog)
         // scanAddress = null puts the scanner in service-UUID discovery mode (no MAC filter).
         verify(transport).scanAddress = null
         verify(scanner).startScan()
-        // Stops early on the hit rather than burning the whole window.
+        // The finally arm stops the scanner and releases the latch once the window closes.
         verify(scanner).stopScan()
         assertThat(sut.isScanWorking).isFalse()
         assertThat(sut.uiState.value).isEqualTo(UiState.Idle)
+    }
+
+    @Test
+    fun `startScan reports failure when the only advertisement is below the RSSI floor`() {
+        whenever(carelevoPatch.isBluetoothEnabled()).thenReturn(true)
+        // Too weak to be a nearby patch (below MIN_SCAN_RSSI = -45) → filtered out, so the window expires
+        // with no selectable device and the scan reports failure.
+        val weak = ScannedDevice(name = "CareLevo-far", address = "94:b2:16:1d:2f:99", rssi = -80)
+        whenever(scanner.scannedDevices).thenReturn(MutableSharedFlow<ScannedDevice>(replay = 1).apply { tryEmit(weak) })
+
+        sut.startScan()
+        awaitEvent(timeoutMs = 15_000L)
+
+        assertThat(events).contains(CarelevoConnectPrepareEvent.ShowMessageScanFailed)
+        assertThat(events).doesNotContain(CarelevoConnectPrepareEvent.ShowConnectDialog)
+        verify(scanner).stopScan()
+        assertThat(sut.isScanWorking).isFalse()
     }
 
     @Test

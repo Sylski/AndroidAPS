@@ -30,6 +30,7 @@ import app.aaps.core.ui.compose.pump.PumpOverviewUiState
 import app.aaps.core.ui.compose.pump.StatusBanner
 import app.aaps.core.ui.compose.pump.tickerFlow
 import app.aaps.pump.carelevo.R
+import app.aaps.pump.carelevo.ble.CarelevoBleSession
 import app.aaps.pump.carelevo.command.CmdDiscard
 import app.aaps.pump.carelevo.command.CmdPumpResume
 import app.aaps.pump.carelevo.command.CmdPumpStop
@@ -88,6 +89,7 @@ class CarelevoOverviewViewModel @Inject constructor(
     private val commandQueue: CommandQueue,
     private val aapsLogger: AAPSLogger,
     private val carelevoPatch: CarelevoPatch,
+    private val bleSession: CarelevoBleSession,
     private val aapsSchedulers: AapsSchedulers,
     private val patchForceDiscardUseCase: CarelevoPatchForceDiscardUseCase,
     private val carelevoDeleteInfusionInfoUseCase: CarelevoDeleteInfusionInfoUseCase,
@@ -141,17 +143,25 @@ class CarelevoOverviewViewModel @Inject constructor(
 
     private val communicationStatus = PumpCommunicationStatus(rxBus, commandQueue, context, viewModelScope)
 
+    private val connectionInfo = combine(
+        bleSession.connected,
+        bleSession.lastConnectedAt
+    ) { connected, lastConnectedAt -> ConnectionInfo(connected, lastConnectedAt) }
+
     private val overviewInputs = combine(
         _patchStateFlow,
         _overviewDataFlow,
         _basalRateFlow,
-        _tempBasalRateFlow
-    ) { patchState, overviewData, basalRate, tempBasalRate ->
+        _tempBasalRateFlow,
+        connectionInfo
+    ) { patchState, overviewData, basalRate, tempBasalRate, connection ->
         OverviewInputs(
             patchState = patchState,
             overviewData = overviewData,
             basalRate = basalRate,
-            tempBasalRate = tempBasalRate
+            tempBasalRate = tempBasalRate,
+            connected = connection.connected,
+            lastConnectedAt = connection.lastConnectedAt
         )
     }
 
@@ -164,7 +174,9 @@ class CarelevoOverviewViewModel @Inject constructor(
             patchState = inputs.patchState,
             overviewData = inputs.overviewData,
             basalRate = inputs.basalRate,
-            tempBasalRate = inputs.tempBasalRate
+            tempBasalRate = inputs.tempBasalRate,
+            connected = inputs.connected,
+            lastConnectedAt = inputs.lastConnectedAt
         )
     }.stateIn(
         scope = viewModelScope,
@@ -173,7 +185,9 @@ class CarelevoOverviewViewModel @Inject constructor(
             patchState = _patchStateFlow.value,
             overviewData = _overviewDataFlow.value,
             basalRate = _basalRateFlow.value,
-            tempBasalRate = _tempBasalRateFlow.value
+            tempBasalRate = _tempBasalRateFlow.value,
+            connected = bleSession.connected.value,
+            lastConnectedAt = bleSession.lastConnectedAt.value
         )
     )
 
@@ -687,25 +701,34 @@ class CarelevoOverviewViewModel @Inject constructor(
         patchState: PatchState?,
         overviewData: CarelevoOverviewUiModel,
         basalRate: Double,
-        tempBasalRate: Double?
+        tempBasalRate: Double?,
+        connected: Boolean,
+        lastConnectedAt: Long
     ): PumpOverviewUiState {
         // A patch is activated (connected OR just idle-disconnected) → no warning banner; let the shared
         // communication/queue status surface (matches Medtrum/Equil). Idle-disconnect is normal now that
-        // the queue owns the lifecycle and reconnects on demand; only "no active patch" is a real warning.
-        val banner = when (patchState) {
-            PatchState.NotConnectedNotBooting -> StatusBanner(
+        // the queue owns the lifecycle and reconnects on demand; only "no active patch" and "suspended"
+        // are real top-status conditions.
+        val banner = when {
+            patchState == PatchState.NotConnectedNotBooting -> StatusBanner(
                 text = rh.gs(R.string.carelevo_state_none_value),
                 level = StatusLevel.WARNING
             )
 
-            else                              -> null
+            // Suspended outranks the (idle) connection status — delivery is paused (matches Medtrum).
+            overviewData.isPumpStopped                      -> StatusBanner(
+                text = rh.gs(CoreUiR.string.pumpsuspended),
+                level = StatusLevel.WARNING
+            )
+
+            else                                            -> null
         } ?: communicationStatus.statusBanner()
 
         val infoRows = buildList {
             add(
                 PumpInfoRow(
                     label = rh.gs(R.string.carelevo_bluetooth_state_key),
-                    value = patchStateLabel(patchState)
+                    value = connectionLabel(patchState, connected)
                 )
             )
 
@@ -714,6 +737,12 @@ class CarelevoOverviewViewModel @Inject constructor(
                 // is normal; values are last-known and the queue reconnects on the next action.
                 PatchState.ConnectedBooted,
                 PatchState.NotConnectedBooted -> {
+                    add(
+                        PumpInfoRow(
+                            label = rh.gs(CoreUiR.string.last_connection_label),
+                            value = lastConnectionLabel(lastConnectedAt)
+                        )
+                    )
                     add(
                         PumpInfoRow(
                             label = rh.gs(R.string.carelevo_serial_number_key),
@@ -824,11 +853,16 @@ class CarelevoOverviewViewModel @Inject constructor(
         )
     }
 
-    private fun patchStateLabel(patchState: PatchState?): String = when (patchState) {
-        PatchState.NotConnectedNotBooting -> rh.gs(R.string.carelevo_state_none_value)
-        PatchState.ConnectedBooted        -> rh.gs(R.string.carelevo_state_connected_value)
-        else                              -> rh.gs(R.string.carelevo_state_disconnected_value)
+    /** Live connection label: Connected only while a session is open, Disconnected when idle, none when no patch. */
+    private fun connectionLabel(patchState: PatchState?, connected: Boolean): String = when {
+        patchState == PatchState.NotConnectedNotBooting -> rh.gs(R.string.carelevo_state_none_value)
+        connected                                       -> rh.gs(R.string.carelevo_state_connected_value)
+        else                                            -> rh.gs(R.string.carelevo_state_disconnected_value)
     }
+
+    /** "Last connection: X ago" reachability value via the shared [DateUtil.minAgo] (matching other pumps); "-" until the first connection. */
+    private fun lastConnectionLabel(lastConnectedAt: Long): String =
+        if (lastConnectedAt <= 0L) "-" else dateUtil.minAgo(rh, lastConnectedAt)
 
     private fun formatRemainingMinutes(totalMinutes: Int): String {
         if (totalMinutes <= 0) return "-"
@@ -849,8 +883,12 @@ class CarelevoOverviewViewModel @Inject constructor(
         val patchState: PatchState,
         val overviewData: CarelevoOverviewUiModel,
         val basalRate: Double,
-        val tempBasalRate: Double?
+        val tempBasalRate: Double?,
+        val connected: Boolean,
+        val lastConnectedAt: Long
     )
+
+    private data class ConnectionInfo(val connected: Boolean, val lastConnectedAt: Long)
 
     /** Canonical clock for the expiry countdown — [dateUtil] so tests can inject a fake time. */
     private fun nowLocal(): LocalDateTime =

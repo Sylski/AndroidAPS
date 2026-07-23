@@ -19,6 +19,7 @@ import app.aaps.pump.carelevo.domain.model.patch.CarelevoPatchInfoDomainModel
 import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.usecase.alarm.CarelevoAlarmInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoInfusionInfoMonitorUseCase
+import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpResumeUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchRptInfusionInfoProcessUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoCreateUserSettingInfoUseCase
@@ -63,6 +64,7 @@ internal class CarelevoPatchTest {
     @Mock lateinit var patchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase
     @Mock lateinit var createUserSettingInfoUseCase: CarelevoCreateUserSettingInfoUseCase
     @Mock lateinit var carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase
+    @Mock lateinit var pumpResumeUseCase: CarelevoPumpResumeUseCase
 
     private lateinit var sut: CarelevoPatch
 
@@ -107,7 +109,8 @@ internal class CarelevoPatchTest {
             userSettingInfoMonitorUseCase = userSettingInfoMonitorUseCase,
             patchRptInfusionInfoProcessUseCase = patchRptInfusionInfoProcessUseCase,
             createUserSettingInfoUseCase = createUserSettingInfoUseCase,
-            carelevoAlarmInfoUseCase = carelevoAlarmInfoUseCase
+            carelevoAlarmInfoUseCase = carelevoAlarmInfoUseCase,
+            pumpResumeUseCase = pumpResumeUseCase
         )
     }
 

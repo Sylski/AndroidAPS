@@ -13,6 +13,7 @@ import app.aaps.core.interfaces.sharedPreferences.SP
 import app.aaps.core.keys.DoubleKey
 import app.aaps.core.keys.interfaces.Preferences
 import app.aaps.pump.carelevo.ble.CarelevoBleTransport
+import app.aaps.pump.carelevo.ble.UnsolicitedMessage
 import app.aaps.pump.carelevo.ble.data.BleState
 import app.aaps.pump.carelevo.ble.data.DeviceModuleState
 import app.aaps.pump.carelevo.ble.data.isAvailable
@@ -28,8 +29,10 @@ import app.aaps.pump.carelevo.domain.model.infusion.CarelevoInfusionInfoDomainMo
 import app.aaps.pump.carelevo.domain.model.patch.CarelevoPatchInfoDomainModel
 import app.aaps.pump.carelevo.domain.model.userSetting.CarelevoUserSettingInfoDomainModel
 import app.aaps.pump.carelevo.domain.type.AlarmCause
+import app.aaps.pump.carelevo.domain.type.AlarmType
 import app.aaps.pump.carelevo.domain.usecase.alarm.CarelevoAlarmInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoInfusionInfoMonitorUseCase
+import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpResumeUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchRptInfusionInfoProcessUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoPatchRptInfusionInfoRequestModel
@@ -63,7 +66,8 @@ class CarelevoPatch @Inject constructor(
     private val userSettingInfoMonitorUseCase: CarelevoUserSettingInfoMonitorUseCase,
     private val patchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase,
     private val createUserSettingInfoUseCase: CarelevoCreateUserSettingInfoUseCase,
-    private val carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase
+    private val carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase,
+    private val pumpResumeUseCase: CarelevoPumpResumeUseCase
 ) {
 
     private val bleDisposable = CompositeDisposable()
@@ -376,6 +380,61 @@ class CarelevoPatch @Inject constructor(
             )
     }
 
+    /**
+     * Reconcile local state to "resumed" after a timed pump-stop ends. The patch auto-resumes at the stop
+     * duration, but with per-op sessions there is no live link to receive its stop-report push, and a 0x91
+     * status read does not carry the suspend flag (see `CarelevoPatchRptInfusionInfoProcessUseCase`) — so
+     * without this, [CarelevoPatchInfoDomainModel.isStopped] would stay latched until an app-initiated
+     * resume. Called by the plugin's expiry watchdog and by [onUnsolicited] when a stop/basal-restart
+     * report is caught mid-session. Repository writes are synchronous, so callers invoke it off the main
+     * thread. Idempotent — a no-op when the pump is already running.
+     */
+    fun reconcileAutoResumed() {
+        // Only act when the pump is currently marked stopped — there is nothing to resume otherwise. This
+        // guards against a basal-restart report (0x88) that fires during normal delivery, or that races a
+        // stop command: an unconditional persistResumed would clear a legitimate suspend.
+        if (patchInfo.value?.getOrNull()?.isStopped != true) {
+            aapsLogger.debug(LTag.PUMPCOMM, "auto-resume reconcile skipped: pump not stopped")
+            return
+        }
+        val ok = pumpResumeUseCase.persistResumed()
+        aapsLogger.info(LTag.PUMPCOMM, "auto-resume reconcile: persistResumed=$ok")
+        if (!ok) return
+        rxBus.send(EventPumpStatusChanged(EventPumpStatusChanged.Status.CONNECTED))
+        rxBus.send(EventRefreshOverview("Carelevo auto-resume", true))
+    }
+
+    /**
+     * Route a patch-pushed [UnsolicitedMessage] (a notification that matched no in-flight request) by
+     * opcode — the bridge the BLE migration dropped. Stop-report (0x8A) / basal-restart (0x88) reconcile
+     * the resumed state; warning/alert/notice pushes (0xA1/0xA2/0xA3) decode to an [AlarmCause] and raise
+     * the alarm, reusing the pre-migration mapping. Runs on the session's IO scope and must NOT start a new
+     * BLE session (the session mutex is held for the whole call — a nested session self-deadlocks);
+     * [reconcileAutoResumed] and [handleAlarm] only persist, so this is safe.
+     */
+    fun onUnsolicited(msg: UnsolicitedMessage) {
+        when (msg.opcode) {
+            RPT_PUMP_STOP, RPT_BASAL_RESTART -> {
+                aapsLogger.info(LTag.PUMPCOMM, "unsolicited resume report ${hex(msg.opcode)} -> reconcile")
+                reconcileAutoResumed()
+            }
+
+            RPT_WARNING                      -> raiseAlarm("warning", AlarmType.WARNING, msg.payload)
+            RPT_ALERT                        -> raiseAlarm("alert", AlarmType.ALERT, msg.payload)
+            RPT_NOTICE                       -> raiseAlarm("notice", AlarmType.NOTICE, msg.payload)
+
+            else                             ->
+                aapsLogger.debug(LTag.PUMPCOMM, "unsolicited frame ${hex(msg.opcode)} (${msg.payload.size}B) unhandled")
+        }
+    }
+
+    /** Decode a pushed alarm frame `[opcode][cause][value]` to an [AlarmCause] and raise it via [handleAlarm]. */
+    private fun raiseAlarm(modelType: String, type: AlarmType, payload: ByteArray) {
+        val causeCode = payload.getOrNull(1)?.toUByte()?.toInt()
+        val value = payload.getOrNull(2)?.toUByte()?.toInt()
+        handleAlarm(modelType, value, AlarmCause.fromTypeAndCode(type, causeCode))
+    }
+
     private fun observeInfusionInfo() {
         infoDisposable += infusionInfoMonitorUseCase.execute()
             .subscribeOn(aapsSchedulers.io)
@@ -463,4 +522,16 @@ class CarelevoPatch @Inject constructor(
             .subscribe()
     }
 
+    private companion object {
+
+        // Unsolicited report opcodes (byte 0). Stop/basal-restart are the auto-resume signals; the
+        // 0xA1/0xA2/0xA3 message reports are the pushed alarms (severity tier via AlarmType).
+        private const val RPT_BASAL_RESTART: Byte = 0x88.toByte() // CMD_BASAL_RESTART_RPT
+        private const val RPT_PUMP_STOP: Byte = 0x8A.toByte()     // CMD_PUMP_STOP_RPT (stop window ended)
+        private const val RPT_WARNING: Byte = 0xA1.toByte()       // CMD_WARNING_MSG_RPT
+        private const val RPT_ALERT: Byte = 0xA2.toByte()         // CMD_ALERT_MSG_RPT
+        private const val RPT_NOTICE: Byte = 0xA3.toByte()        // CMD_NOTICE_MSG_RPT
+
+        private fun hex(b: Byte) = "0x%02X".format(b.toInt() and 0xFF)
+    }
 }

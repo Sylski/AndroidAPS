@@ -27,8 +27,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
@@ -75,6 +79,22 @@ class CarelevoBleSession @Inject constructor(
 
     // Wall-clock of the last session close, for the inter-session settle below.
     @Volatile private var lastCloseAtMs = 0L
+
+    /**
+     * Handler for unsolicited notifications (alarms, stop/basal-restart reports) received while a session
+     * is open — the [BleClient.unsolicitedEvents] bridge the BLE migration dropped. Set by the pump plugin
+     * on start, cleared on stop. Invoked on the session's IO scope; the handler MUST NOT start another BLE
+     * session ([withSession] holds [sessionMutex] for its whole duration, so a nested session self-deadlocks).
+     */
+    @Volatile var unsolicitedHandler: ((UnsolicitedMessage) -> Unit)? = null
+
+    private val _connected = MutableStateFlow(false)
+    /** Live GATT link state: true only while a per-op session is open (connected → command → close). */
+    val connected: StateFlow<Boolean> = _connected.asStateFlow()
+
+    private val _lastConnectedAt = MutableStateFlow(0L)
+    /** Wall-clock (ms) of the last time a session reached CONNECTED — the "last connection" reachability signal. */
+    val lastConnectedAt: StateFlow<Long> = _lastConnectedAt.asStateFlow()
 
     /** Read Infusion Info (0x31 → 0x91) — the periodic status read (reservoir, totals, pump state). */
     suspend fun readInfusionInfo(address: String): InfusionInfoResponse =
@@ -218,6 +238,18 @@ class CarelevoBleSession @Inject constructor(
             val scope = CoroutineScope(sessionDispatcher + SupervisorJob())
             val gatt = BleTransportGattConnection(transport, writeUuid, notifyUuid, scope)
             val client: BleClient = BleClientImpl(gatt, writeUuid, notifyUuid, scope)
+            // Bridge patch-pushed frames (alarms, stop/basal-restart reports) to the handler for the life
+            // of this session. Subscribed before open() so a frame during the handshake isn't missed; the
+            // finally's scope.cancel() tears this collector down with the session.
+            scope.launch {
+                client.unsolicitedEvents.collect { msg ->
+                    try {
+                        unsolicitedHandler?.invoke(msg)
+                    } catch (t: Throwable) {
+                        aapsLogger.error(LTag.PUMPCOMM, "unsolicited handler error", t)
+                    }
+                }
+            }
             try {
                 // Bound the ENTIRE connect→discover→enable handshake, not just the CONNECTED wait: a lost
                 // CCCD-write callback (which the transport documents as "surfaced by the caller's withTimeout")
@@ -226,9 +258,12 @@ class CarelevoBleSession @Inject constructor(
                 // gatt (aborting the pending ack) and releases the mutex.
                 val openTimeoutMs = if (ensureBond) CONNECT_TIMEOUT_MS + BOND_TIMEOUT_MS else CONNECT_TIMEOUT_MS
                 withTimeout(openTimeoutMs.milliseconds) { open(gatt, mac, ensureBond) }
+                _lastConnectedAt.value = System.currentTimeMillis()
+                _connected.value = true
                 aapsLogger.debug(LTag.PUMPCOMM, "bleSession: reading $label")
                 withTimeout(timeoutMs.milliseconds) { block(client) }
             } finally {
+                _connected.value = false
                 gatt.close()
                 scope.cancel()
                 lastCloseAtMs = System.currentTimeMillis()

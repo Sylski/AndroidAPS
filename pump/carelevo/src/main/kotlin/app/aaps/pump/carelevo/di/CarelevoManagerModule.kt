@@ -9,6 +9,7 @@ import app.aaps.pump.carelevo.ble.CarelevoBleTransport
 import app.aaps.pump.carelevo.common.CarelevoPatch
 import app.aaps.pump.carelevo.domain.usecase.alarm.CarelevoAlarmInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoInfusionInfoMonitorUseCase
+import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpResumeUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchRptInfusionInfoProcessUseCase
 import app.aaps.pump.carelevo.domain.usecase.userSetting.CarelevoCreateUserSettingInfoUseCase
@@ -37,7 +38,8 @@ class CarelevoManagerModule {
         carelevoUserSettingInfoMonitorUseCase: CarelevoUserSettingInfoMonitorUseCase,
         carelevoPatchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase,
         carelevoCreateUserSettingInfoUserCase: CarelevoCreateUserSettingInfoUseCase,
-        carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase
+        carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase,
+        carelevoPumpResumeUseCase: CarelevoPumpResumeUseCase
     ): CarelevoPatch {
         return CarelevoPatch(
             transport,
@@ -51,7 +53,8 @@ class CarelevoManagerModule {
             carelevoUserSettingInfoMonitorUseCase,
             carelevoPatchRptInfusionInfoProcessUseCase,
             carelevoCreateUserSettingInfoUserCase,
-            carelevoAlarmInfoUseCase
+            carelevoAlarmInfoUseCase,
+            carelevoPumpResumeUseCase
         )
     }
 }

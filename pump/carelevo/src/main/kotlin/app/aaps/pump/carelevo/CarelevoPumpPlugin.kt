@@ -81,16 +81,19 @@ import io.reactivex.rxjava3.core.Observable
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.disposables.Disposable
 import io.reactivex.rxjava3.kotlin.plusAssign
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -156,6 +159,11 @@ class CarelevoPumpPlugin @Inject constructor(
     private var scope: CoroutineScope? = null
     private var lifecycleObserver: LifecycleEventObserver? = null
 
+    // Auto-resume watchdog cadence + safety margin: poll this often, and reconcile once the stop window has
+    // elapsed plus this margin (so the patch has actually auto-resumed before AAPS clears its suspend).
+    private val autoResumePollMs = 30_000L
+    private val autoResumeMarginMs = 30_000L
+
     // The coroutine BLE session every pump op runs over. Field-injected — its @Inject constructor
     // holds no eager BLE state.
     @Inject lateinit var bleSession: CarelevoBleSession
@@ -168,11 +176,15 @@ class CarelevoPumpPlugin @Inject constructor(
         initializeOnStart()
         registerBleReceiverIfNeeded()
         startAlarmObserving()
+        startAutoResumeWatchdog()
+        // Consume patch-pushed frames (alarms, stop/basal-restart reports) whenever a session is open.
+        bleSession.unsolicitedHandler = carelevoPatch::onUnsolicited
     }
 
     override suspend fun onStop() {
         super.onStop()
         aapsLogger.debug(LTag.PUMP, "onStop called")
+        bleSession.unsolicitedHandler = null
         settingsCoordinator.clearUserSettings(pluginDisposable)
         pluginDisposable.clear()
 
@@ -252,6 +264,54 @@ class CarelevoPumpPlugin @Inject constructor(
                     need.lowInsulinHours?.let { commandQueue.customCommand(CmdUpdateLowInsulinNotice(it)) }
                 }
             }
+    }
+
+    /**
+     * Auto-resume watchdog. A timed pump-stop makes the patch auto-resume at the stop duration, but with
+     * per-op BLE sessions there is no live link to receive the patch's stop-report push, and a 0x91 status
+     * read does not carry the suspend flag — so `isStopped` would stay latched until an app-initiated resume
+     * (issue #4993).
+     *
+     * Implemented as a resilient periodic check rather than a one-shot timer, so it is robust to the failure
+     * modes a single fire-and-forget timer has:
+     *  - Each tick is independently guarded, so a transient reconcile failure neither kills the watchdog
+     *    (it simply retries next tick) nor is permanent.
+     *  - Elapsed time is measured from a DURABLE anchor ([CarelevoBasalInfusionInfoDomainModel.updatedAt],
+     *    persisted at stop time and untouched by 0x91 status reads), so an app restart mid-stop still
+     *    resumes on schedule instead of re-arming a full window.
+     *  - A status read that momentarily resurrects `isStopped` is re-cleared on the next tick, because the
+     *    anchor is stable.
+     */
+    private fun startAutoResumeWatchdog() {
+        scope?.launch {
+            while (isActive) {
+                try {
+                    checkAutoResume()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    aapsLogger.error(LTag.PUMPCOMM, "auto-resume check failed (will retry)", e)
+                }
+                delay(autoResumePollMs)
+            }
+        }
+    }
+
+    /** One watchdog tick: reconcile a timed stop whose window has elapsed. Idempotent — safe to call repeatedly. */
+    private suspend fun checkAutoResume() {
+        val patchInfo = carelevoPatch.patchInfo.value?.getOrNull() ?: return
+        if (patchInfo.isStopped != true) return
+        val stopMinutes = patchInfo.stopMinutes ?: return
+        if (stopMinutes <= 0) return
+        // Durable stop-start anchor: basalInfusionInfo.updatedAt is set at persistStopped, survives an app
+        // restart (persisted), and is not moved by 0x91 status reads (which only rewrite patchInfo). Skip
+        // until infusion info is loaded.
+        val stopStartedAt = carelevoPatch.infusionInfo.value?.getOrNull()?.basalInfusionInfo?.updatedAt?.millis ?: return
+        val elapsedMs = System.currentTimeMillis() - stopStartedAt
+        if (elapsedMs < stopMinutes * 60_000L + autoResumeMarginMs) return
+        aapsLogger.info(LTag.PUMPCOMM, "auto-resume: ${stopMinutes}min stop elapsed (${elapsedMs / 1000}s) -> reconcile")
+        carelevoPatch.reconcileAutoResumed()
+        commandQueue.readStatus("Carelevo auto-resume")
     }
 
     private data class SettingsSyncNeed(val maxBolusDose: Double?, val lowInsulinHours: Int?)

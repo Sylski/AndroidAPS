@@ -31,6 +31,7 @@ import app.aaps.pump.carelevo.domain.type.AlarmCause
 import app.aaps.pump.carelevo.domain.usecase.CarelevoUseCaseResponse
 import app.aaps.pump.carelevo.domain.usecase.alarm.CarelevoAlarmInfoUseCase
 import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoInfusionInfoMonitorUseCase
+import app.aaps.pump.carelevo.domain.usecase.infusion.CarelevoPumpResumeUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchInfoMonitorUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.CarelevoPatchRptInfusionInfoProcessUseCase
 import app.aaps.pump.carelevo.domain.usecase.patch.model.CarelevoPatchRptInfusionInfoRequestModel
@@ -91,6 +92,7 @@ internal class CarelevoPatchMoreTest {
     @Mock lateinit var patchRptInfusionInfoProcessUseCase: CarelevoPatchRptInfusionInfoProcessUseCase
     @Mock lateinit var createUserSettingInfoUseCase: CarelevoCreateUserSettingInfoUseCase
     @Mock lateinit var carelevoAlarmInfoUseCase: CarelevoAlarmInfoUseCase
+    @Mock lateinit var pumpResumeUseCase: CarelevoPumpResumeUseCase
     @Mock lateinit var bleAdapter: BleAdapter
 
     private lateinit var sut: CarelevoPatch
@@ -129,7 +131,8 @@ internal class CarelevoPatchMoreTest {
             userSettingInfoMonitorUseCase = userSettingInfoMonitorUseCase,
             patchRptInfusionInfoProcessUseCase = patchRptInfusionInfoProcessUseCase,
             createUserSettingInfoUseCase = createUserSettingInfoUseCase,
-            carelevoAlarmInfoUseCase = carelevoAlarmInfoUseCase
+            carelevoAlarmInfoUseCase = carelevoAlarmInfoUseCase,
+            pumpResumeUseCase = pumpResumeUseCase
         )
 
     private fun profileWith(vararg values: Pair<Int, Double>): Profile {
@@ -428,6 +431,34 @@ internal class CarelevoPatchMoreTest {
         val captor = argumentCaptor<CarelevoAlarmInfo>()
         verify(carelevoAlarmInfoUseCase).upsertAlarm(captor.capture())
         assertThat(captor.firstValue.value).isNull()
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // reconcileAutoResumed — the auto-resume guard
+    // ---------------------------------------------------------------------------------------------
+
+    @Test
+    fun `reconcileAutoResumed clears the stopped state when the pump is stopped`() {
+        whenever(patchInfoMonitorUseCase.execute())
+            .thenReturn(Observable.just(ResponseResult.Success(patchInfo().copy(isStopped = true, stopMinutes = 30))))
+        whenever(pumpResumeUseCase.persistResumed()).thenReturn(true)
+        sut = createPatch()
+        sut.initPatch()
+
+        sut.reconcileAutoResumed()
+
+        verify(pumpResumeUseCase).persistResumed()
+    }
+
+    @Test
+    fun `reconcileAutoResumed is a no-op while the pump is running`() {
+        // The default patchInfo() has isStopped = null (running); a basal-restart report (0x88) that fires
+        // during normal delivery, or races a stop, must NOT clear a legitimate suspend.
+        sut.initPatch()
+
+        sut.reconcileAutoResumed()
+
+        verify(pumpResumeUseCase, never()).persistResumed()
     }
 
     // ---------------------------------------------------------------------------------------------
